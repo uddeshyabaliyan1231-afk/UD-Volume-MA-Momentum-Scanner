@@ -1,0 +1,461 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UD Volume MA Momentum Scanner</title>
+
+<style>
+:root {
+  --bg: #080d18;
+  --panel: #111a2b;
+  --border: #25344c;
+  --text: #e9effa;
+  --muted: #8999b2;
+  --green: #20c98b;
+  --red: #f05b70;
+  --blue: #528bff;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Arial, sans-serif;
+}
+header {
+  background: #101a2c;
+  border-bottom: 1px solid var(--border);
+  padding: 20px;
+}
+.header-inner, main {
+  max-width: 1250px;
+  margin: auto;
+}
+h1 { margin: 0; font-size: 23px; }
+.subtitle {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 7px;
+}
+main { padding: 20px; }
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+.panel, .stat {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+.stat span {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: .5px;
+}
+.stat strong {
+  display: block;
+  font-size: 23px;
+  margin-top: 9px;
+}
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 20px 0;
+}
+select, button {
+  background: #1b2a42;
+  color: white;
+  border: 1px solid #354966;
+  padding: 11px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+button {
+  cursor: pointer;
+  background: var(--blue);
+  border: 0;
+  font-weight: bold;
+}
+button:disabled { opacity: .5; }
+.section-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 25px 0 12px;
+}
+.section-title h2 {
+  font-size: 17px;
+  margin: 0;
+}
+.section-title small { color: var(--muted); }
+.rising-title { color: var(--green); }
+.falling-title { color: var(--red); }
+.signal-list {
+  display: grid;
+  gap: 12px;
+}
+.signal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+.signal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.coin { font-size: 18px; font-weight: bold; }
+.direction {
+  padding: 7px 12px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: bold;
+}
+.BUY { background: #123e32; color: #44e0a5; }
+.SELL { background: #481d2a; color: #ff8294; }
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 15px;
+  margin-top: 17px;
+}
+.metric small {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  margin-bottom: 6px;
+}
+.metric b {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.passed { color: var(--green); }
+.failed { color: var(--red); }
+.empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 35px 15px;
+}
+.footer {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+  padding: 25px 0;
+}
+#message {
+  color: #ffb36b;
+  font-size: 12px;
+  margin-top: 10px;
+}
+@media(max-width:700px) {
+  main { padding: 12px; }
+  .stats { grid-template-columns: repeat(2, 1fr); }
+  .metrics { grid-template-columns: repeat(2, 1fr); }
+  h1 { font-size: 19px; }
+}
+</style>
+</head>
+
+<body>
+<header>
+  <div class="header-inner">
+    <h1>UD Volume MA Momentum Scanner</h1>
+    <div class="subtitle">
+      COINDCX USDT FUTURES · 5M ENTRY · 15M + 1H TREND CONFIRMATION
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <div class="stats">
+    <div class="stat">
+      <span>SCANNER STATUS</span>
+      <strong id="scannerStatus">CONNECTING</strong>
+    </div>
+    <div class="stat">
+      <span>PAIRS SCANNED</span>
+      <strong id="scanned">0</strong>
+    </div>
+    <div class="stat">
+      <span>ACTIVE PAIRS</span>
+      <strong id="activePairs">0</strong>
+    </div>
+    <div class="stat">
+      <span>TOTAL SIGNALS</span>
+      <strong id="totalSignals">0</strong>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <div>
+      <b>SCAN UNIVERSE</b>
+      <div class="subtitle">Choose how many coins the backend scans</div>
+    </div>
+    <div>
+      <select id="scanLimit">
+        <option value="100">100 Coins</option>
+        <option value="500">500 Coins</option>
+        <option value="1000">1000 Coins</option>
+      </select>
+      <button id="applyButton">APPLY & SCAN</button>
+      <button id="refreshButton">REFRESH</button>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <div>
+      <b>LIVE SCANNER MONITOR</b>
+      <div class="subtitle" id="lastScan">Waiting for first scan...</div>
+    </div>
+    <div class="subtitle" id="errorCount">API errors: 0</div>
+  </div>
+
+  <div class="section-title">
+    <h2 class="rising-title">↑ RISING VOLUME MA</h2>
+    <small id="risingCount">0 signals</small>
+  </div>
+  <div id="risingSignals" class="signal-list">
+    <div class="panel empty">Waiting for confirmed rising volume MA setups...</div>
+  </div>
+
+  <div class="section-title">
+    <h2 class="falling-title">↓ FALLING VOLUME MA</h2>
+    <small id="fallingCount">0 signals</small>
+  </div>
+  <div id="fallingSignals" class="signal-list">
+    <div class="panel empty">Waiting for confirmed falling volume MA setups...</div>
+  </div>
+
+  <div id="message"></div>
+
+  <div class="footer">
+    Signals require trend alignment and liquidity filters. No signal is guaranteed.
+  </div>
+
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+
+async function api(url, options = {}) {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    throw new Error("API error: " + response.status);
+  }
+  return response.json();
+}
+
+function price(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "--";
+  return n.toPrecision(9);
+}
+
+function time(value) {
+  if (!value) return "--";
+  return new Date(value).toLocaleString();
+}
+
+function signalCard(s) {
+  const side = String(s.direction || "").toUpperCase();
+  const movement = s.section === "RISING"
+    ? "MA RISE"
+    : "MA FALL";
+
+  const movementValue = s.section === "RISING"
+    ? (s.maRisePercent ?? "--") + "%"
+    : (s.maFallPercent ?? "--") + "%";
+
+  return `
+    <article class="signal">
+      <div class="signal-head">
+        <div>
+          <div class="coin">${s.coin || s.pair || "--"}</div>
+          <div class="subtitle">${s.pair || ""} · 5 MIN ENTRY</div>
+        </div>
+        <span class="direction ${side}">${side}</span>
+      </div>
+
+      <div class="metrics">
+        <div class="metric">
+          <small>ENTRY PRICE</small>
+          <b>${price(s.entry)}</b>
+        </div>
+        <div class="metric">
+          <small>STOP LOSS</small>
+          <b>${price(s.stopLoss)}</b>
+        </div>
+        <div class="metric">
+          <small>TARGET</small>
+          <b>${price(s.target)}</b>
+        </div>
+        <div class="metric">
+          <small>RISK : REWARD</small>
+          <b>1 : ${s.riskReward ?? "--"}</b>
+        </div>
+
+        <div class="metric">
+          <small>${movement}</small>
+          <b>${movementValue}</b>
+        </div>
+        <div class="metric">
+          <small>VOLUME RATIO</small>
+          <b>${s.volumeRatio ?? "--"}x</b>
+        </div>
+        <div class="metric">
+          <small>15M / 1H TREND</small>
+          <b>${s.trend15m || "--"} / ${s.trend1h || "--"}</b>
+        </div>
+        <div class="metric">
+          <small>5M TREND</small>
+          <b>${s.trend5m || "--"}</b>
+        </div>
+
+        <div class="metric">
+          <small>ORDERBOOK SPREAD</small>
+          <b>${s.spreadPercent ?? "--"}%</b>
+        </div>
+        <div class="metric">
+          <small>LIQUIDITY CHECK</small>
+          <b class="passed">${s.liquidityStatus || "--"}</b>
+        </div>
+        <div class="metric">
+          <small>TRAP FILTER</small>
+          <b class="passed">${s.trapProtection || "--"}</b>
+        </div>
+        <div class="metric">
+          <small>SIGNAL TIME</small>
+          <b>${time(s.timestamp)}</b>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderGroup(containerId, countId, signals, emptyMessage) {
+  $(countId).textContent = signals.length + " signals";
+
+  if (!signals.length) {
+    $(containerId).innerHTML =
+      `<div class="panel empty">${emptyMessage}</div>`;
+    return;
+  }
+
+  $(containerId).innerHTML =
+    signals.map(signalCard).join("");
+}
+
+async function loadSettings() {
+  const settings = await api("/api/settings");
+  $("scanLimit").value =
+    String(settings.selectedScanLimit || 100);
+}
+
+async function refreshDashboard() {
+  try {
+    const [status, data] = await Promise.all([
+      api("/api/status"),
+      api("/api/signals")
+    ]);
+
+    const rising = data.rising || [];
+    const falling = data.falling || [];
+
+    $("scannerStatus").textContent =
+      status.running ? "SCANNING" : "ONLINE";
+
+    $("scannerStatus").style.color =
+      status.running ? "#ffbd59" : "#20c98b";
+
+    $("scanned").textContent = status.scanned ?? 0;
+    $("activePairs").textContent = status.activePairs ?? 0;
+    $("totalSignals").textContent =
+      rising.length + falling.length;
+
+    $("errorCount").textContent =
+      "API errors: " + (status.errors ?? 0);
+
+    $("lastScan").textContent =
+      "Last scan: " + time(status.lastScan) +
+      " · " + (status.message || "");
+
+    renderGroup(
+      "risingSignals",
+      "risingCount",
+      rising,
+      "NO TRADE — No confirmed rising volume MA setup."
+    );
+
+    renderGroup(
+      "fallingSignals",
+      "fallingCount",
+      falling,
+      "NO TRADE — No confirmed falling volume MA setup."
+    );
+
+    $("message").textContent =
+      status.lastError
+        ? "Latest API error: " + status.lastError
+        : "";
+
+  } catch (error) {
+    $("scannerStatus").textContent = "API ERROR";
+    $("scannerStatus").style.color = "#f05b70";
+    $("message").textContent = error.message;
+  }
+}
+
+$("applyButton").addEventListener("click", async () => {
+  try {
+    $("applyButton").disabled = true;
+
+    await api("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scanLimit: Number($("scanLimit").value)
+      })
+    });
+
+    $("message").textContent = "Scan limit updated. New scan started.";
+    await refreshDashboard();
+
+  } catch (error) {
+    $("message").textContent = error.message;
+  } finally {
+    $("applyButton").disabled = false;
+  }
+});
+
+$("refreshButton").addEventListener("click", async () => {
+  try {
+    await api("/api/refresh", { method: "POST" });
+    $("message").textContent = "Manual scan requested.";
+    await refreshDashboard();
+  } catch (error) {
+    $("message").textContent = error.message;
+  }
+});
+
+async function startDashboard() {
+  await loadSettings();
+  await refreshDashboard();
+  setInterval(refreshDashboard, 5000);
+}
+
+startDashboard().catch(error => {
+  $("message").textContent = error.message;
+});
+</script>
+</body>
+</html>
