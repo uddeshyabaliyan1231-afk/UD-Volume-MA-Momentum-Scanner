@@ -10,15 +10,14 @@ app.use(express.static("public"));
 
 const PORT = process.env.PORT || 3000;
 
-const ACTIVE_URL =
-  "https://api.coindcx.com/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=USDT";
-
-const PUBLIC_URL = "https://public.coindcx.com";
+const API = "https://api.coindcx.com";
+const FUTURES = "https://public.coindcx.com";
 
 const CONFIG = {
-  scanInterval: 30000,
-  concurrency: 4,
-  candleLimit: 100,
+  scanInterval: 180000,
+  concurrency: 3,
+  fiveMinuteCandles: 300,
+  hourlyCandles: 70,
 
   volumeMAPeriod: 20,
   flatLookback: 6,
@@ -68,7 +67,7 @@ const status = {
 const sleep = ms =>
   new Promise(resolve => setTimeout(resolve, ms));
 
-function number(value) {
+function num(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
 }
@@ -76,9 +75,9 @@ function number(value) {
 async function getJSON(url, params = {}) {
   const response = await axios.get(url, {
     params,
-    timeout: 12000,
+    timeout: 15000,
     headers: {
-      "User-Agent": "UD-Volume-MA-Scanner/1.0"
+      "User-Agent": "UD-Volume-MA-Scanner/2.0"
     }
   });
 
@@ -94,7 +93,7 @@ function getBase(pair) {
 }
 
 function formatPair(value) {
-  let pair = String(value).trim().toUpperCase();
+  const pair = String(value).trim().toUpperCase();
 
   if (pair.startsWith("B-")) return pair;
 
@@ -108,10 +107,13 @@ function formatPair(value) {
 }
 
 async function getActivePairs() {
-  const data = await getJSON(ACTIVE_URL);
+  const data = await getJSON(
+    `${API}/exchange/v1/derivatives/futures/data/active_instruments`,
+    { "margin_currency_short_name[]": "USDT" }
+  );
 
   if (!Array.isArray(data)) {
-    throw new Error("Invalid CoinDCX active instruments response");
+    throw new Error("Invalid active instruments response");
   }
 
   const pairs = data.map(item => {
@@ -137,72 +139,103 @@ async function getActivePairs() {
   });
 }
 
-const INTERVAL_MS = {
-  "5m": 5 * 60 * 1000,
-  "15m": 15 * 60 * 1000,
-  "1h": 60 * 60 * 1000
-};
+function normalizeCandles(response) {
+  const data = Array.isArray(response)
+    ? response
+    : Array.isArray(response?.data)
+      ? response.data
+      : [];
 
-function normalizeCandles(data) {
-  if (!Array.isArray(data)) return [];
-
-  return data.map(c => {
-    if (Array.isArray(c)) {
-      return {
-        time: number(c[0]),
-        open: number(c[1]),
-        high: number(c[2]),
-        low: number(c[3]),
-        close: number(c[4]),
-        volume: number(c[5])
-      };
-    }
-
-    return {
-      time: number(c.time ?? c.t),
-      open: number(c.open ?? c.o),
-      high: number(c.high ?? c.h),
-      low: number(c.low ?? c.l),
-      close: number(c.close ?? c.c),
-      volume: number(c.volume ?? c.v)
-    };
-  }).filter(c =>
+  return data.map(c => ({
+    time: num(c.time ?? c.t),
+    open: num(c.open ?? c.o),
+    high: num(c.high ?? c.h),
+    low: num(c.low ?? c.l),
+    close: num(c.close ?? c.c),
+    volume: num(c.volume ?? c.v)
+  }))
+  .filter(c =>
     c.time > 0 &&
     c.open > 0 &&
     c.high > 0 &&
     c.low > 0 &&
     c.close > 0 &&
     c.volume >= 0
-  ).sort((a, b) => a.time - b.time);
+  )
+  .sort((a, b) => a.time - b.time);
 }
 
-async function getCandles(pair, interval) {
-  const endTime = Date.now();
-  const startTime =
-    endTime - INTERVAL_MS[interval] * CONFIG.candleLimit;
+// CoinDCX futures candle API uses seconds,
+// resolution values and pcode=f.
+async function getFuturesCandles(pair, resolution, count, intervalMs) {
+  const to = Math.floor(Date.now() / 1000);
+  const from = Math.floor(
+    (Date.now() - count * intervalMs) / 1000
+  );
 
-  const data = await getJSON(
-    `${PUBLIC_URL}/market_data/candles`,
+  const response = await getJSON(
+    `${FUTURES}/market_data/candlesticks`,
     {
       pair: formatPair(pair),
-      interval,
-      startTime,
-      endTime
+      from,
+      to,
+      resolution,
+      pcode: "f"
     }
   );
 
-  const candles = normalizeCandles(data);
+  if (
+    response &&
+    response.s &&
+    response.s !== "ok"
+  ) {
+    throw new Error(
+      `Futures candle API: ${response.s}`
+    );
+  }
 
-  // Incomplete candle is excluded.
-  return candles.filter(c =>
-    c.time + INTERVAL_MS[interval] <= Date.now()
-  );
+  return normalizeCandles(response);
 }
 
+// Build 15-minute candles from completed 5-minute candles.
+function aggregate15m(candles) {
+  const groups = new Map();
+  const interval = 15 * 60 * 1000;
+
+  for (const candle of candles) {
+    const bucket = Math.floor(candle.time / interval) * interval;
+
+    if (!groups.has(bucket)) {
+      groups.set(bucket, {
+        time: bucket,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+        volume: candle.volume
+      });
+    } else {
+      const item = groups.get(bucket);
+      item.high = Math.max(item.high, candle.high);
+      item.low = Math.min(item.low, candle.low);
+      item.close = candle.close;
+      item.volume += candle.volume;
+    }
+  }
+
+  const now = Date.now();
+
+  return [...groups.values()]
+    .filter(c => c.time + interval <= now)
+    .sort((a, b) => a.time - b.time);
+}
+
+// Futures-specific order book endpoint.
 async function getOrderbook(pair) {
+  const instrument = formatPair(pair);
+
   return getJSON(
-    `${PUBLIC_URL}/market_data/orderbook`,
-    { pair: formatPair(pair) }
+    `${FUTURES}/market_data/v3/orderbook/${instrument}-futures/50`
   );
 }
 
@@ -228,7 +261,6 @@ function sma(values, period) {
 function emaSeries(values, period) {
   const output = [];
   const multiplier = 2 / (period + 1);
-
   let current = null;
 
   values.forEach((value, index) => {
@@ -251,7 +283,6 @@ function getTrend(candles) {
   if (candles.length < 60) return "UNKNOWN";
 
   const closes = candles.map(c => c.close);
-
   const fast = emaSeries(closes, 20);
   const slow = emaSeries(closes, 50);
 
@@ -288,7 +319,7 @@ function getTrend(candles) {
   return "NEUTRAL";
 }
 
-// Pattern A: flat/compressed volume MA followed by rising MA.
+// Flat volume MA followed by confirmed upward movement.
 function detectRisingVolumeMA(candles) {
   const volumes = candles.map(c => c.volume);
   const ma = sma(volumes, CONFIG.volumeMAPeriod)
@@ -316,7 +347,6 @@ function detectRisingVolumeMA(candles) {
 
   if (flatRange > CONFIG.flatTolerance) return null;
 
-  // Every recent MA point must rise.
   for (let i = 1; i < rising.length; i++) {
     if (rising[i] <= rising[i - 1]) return null;
   }
@@ -326,7 +356,6 @@ function detectRisingVolumeMA(candles) {
 
   if (rise < CONFIG.minimumRise) return null;
 
-  // Current candle volume must confirm the MA movement.
   const recentVolume = volumes[volumes.length - 1];
   const priorVolumes = volumes.slice(-21, -1);
 
@@ -344,50 +373,47 @@ function detectRisingVolumeMA(candles) {
   return {
     pattern: "RISING_VOLUME_MA",
     maRisePercent: Number((rise * 100).toFixed(2)),
-    volumeRatio: Number((recentVolume / averageVolume).toFixed(2))
+    volumeRatio: Number(
+      (recentVolume / averageVolume).toFixed(2)
+    )
   };
 }
 
-// Pattern B: volume MA has peaked and starts falling.
+// Volume MA peak followed by confirmed downward movement.
 function detectFallingVolumeMA(candles) {
   const volumes = candles.map(c => c.volume);
   const ma = sma(volumes, CONFIG.volumeMAPeriod)
     .filter(v => v !== null);
 
-  const lookback = 8;
   const falling = ma.slice(-CONFIG.fallingLookback);
 
   if (
-    ma.length < lookback + CONFIG.fallingLookback
+    ma.length < 11 ||
+    falling.length < CONFIG.fallingLookback
   ) {
     return null;
   }
 
-  // Each recent MA value must move down.
   for (let i = 1; i < falling.length; i++) {
     if (falling[i] >= falling[i - 1]) return null;
   }
 
-  const previous = ma.slice(
-    -(lookback + CONFIG.fallingLookback),
-    -CONFIG.fallingLookback
-  );
-
+  const previous = ma.slice(-11, -3);
   const peak = Math.max(...previous);
+  const peakIndex = previous.indexOf(peak);
   const last = falling[falling.length - 1];
 
-  if (peak <= 0) return null;
+  if (
+    peak <= 0 ||
+    peakIndex < 1 ||
+    peakIndex === previous.length - 1
+  ) {
+    return null;
+  }
 
   const fall = (peak - last) / peak;
 
   if (fall < CONFIG.minimumFall) return null;
-
-  // The peak must be a genuine local high, not a flat MA.
-  const peakIndex = previous.indexOf(peak);
-
-  if (peakIndex < 1 || peakIndex === previous.length - 1) {
-    return null;
-  }
 
   const recentVolume = volumes[volumes.length - 1];
   const priorVolumes = volumes.slice(-21, -1);
@@ -406,7 +432,9 @@ function detectFallingVolumeMA(candles) {
   return {
     pattern: "FALLING_VOLUME_MA",
     maFallPercent: Number((fall * 100).toFixed(2)),
-    volumeRatio: Number((recentVolume / averageVolume).toFixed(2))
+    volumeRatio: Number(
+      (recentVolume / averageVolume).toFixed(2)
+    )
   };
 }
 
@@ -434,34 +462,26 @@ function calculateATR(candles, period = CONFIG.atrPeriod) {
 function parseBookLevels(levels) {
   if (!levels) return [];
 
-  if (
-    Array.isArray(levels) &&
-    levels.length === 1 &&
-    Array.isArray(levels[0])
-  ) {
-    levels = levels[0];
-  }
-
   if (Array.isArray(levels)) {
     return levels.map(level => {
       if (Array.isArray(level)) {
         return {
-          price: number(level[0]),
-          quantity: number(level[1])
+          price: num(level[0]),
+          quantity: num(level[1])
         };
       }
 
       return {
-        price: number(level.price ?? level.rate),
-        quantity: number(level.quantity ?? level.amount)
+        price: num(level.price ?? level.rate),
+        quantity: num(level.quantity ?? level.amount)
       };
     }).filter(x => x.price > 0 && x.quantity > 0);
   }
 
   if (typeof levels === "object") {
     return Object.entries(levels).map(([price, quantity]) => ({
-      price: number(price),
-      quantity: number(quantity)
+      price: num(price),
+      quantity: num(quantity)
     })).filter(x => x.price > 0 && x.quantity > 0);
   }
 
@@ -475,14 +495,20 @@ function checkOrderbook(book, currentPrice) {
   const asks = parseBookLevels(data?.asks);
 
   if (!bids.length || !asks.length) {
-    return { passed: false, reason: "Orderbook unavailable" };
+    return {
+      passed: false,
+      reason: "Orderbook unavailable"
+    };
   }
 
   const bestBid = Math.max(...bids.map(x => x.price));
   const bestAsk = Math.min(...asks.map(x => x.price));
 
   if (bestAsk <= bestBid || currentPrice <= 0) {
-    return { passed: false, reason: "Invalid orderbook spread" };
+    return {
+      passed: false,
+      reason: "Invalid orderbook"
+    };
   }
 
   const spread = (bestAsk - bestBid) / currentPrice;
@@ -496,22 +522,29 @@ function checkOrderbook(book, currentPrice) {
     .reduce((sum, x) => sum + x.price * x.quantity, 0);
 
   if (spread > CONFIG.maximumSpread) {
-    return { passed: false, reason: "Spread too high" };
+    return {
+      passed: false,
+      reason: "Spread too high"
+    };
   }
 
   if (
     bidDepth < CONFIG.minimumOrderbookDepth ||
     askDepth < CONFIG.minimumOrderbookDepth
   ) {
-    return { passed: false, reason: "Insufficient orderbook depth" };
+    return {
+      passed: false,
+      reason: "Insufficient orderbook depth"
+    };
   }
 
-  const imbalance =
-    bidDepth / Math.max(askDepth, 1);
+  const imbalance = bidDepth / Math.max(askDepth, 1);
 
-  // Avoid severely one-sided visible books.
   if (imbalance < 0.20 || imbalance > 5) {
-    return { passed: false, reason: "Abnormal orderbook imbalance" };
+    return {
+      passed: false,
+      reason: "Abnormal orderbook imbalance"
+    };
   }
 
   return {
@@ -524,7 +557,10 @@ function checkOrderbook(book, currentPrice) {
 
 function checkLiquidityTrap(candles, direction) {
   if (candles.length < 10) {
-    return { passed: false, reason: "Insufficient candle history" };
+    return {
+      passed: false,
+      reason: "Insufficient candle history"
+    };
   }
 
   const last = candles[candles.length - 1];
@@ -533,7 +569,10 @@ function checkLiquidityTrap(candles, direction) {
   const range = last.high - last.low;
 
   if (range <= 0) {
-    return { passed: false, reason: "Invalid candle range" };
+    return {
+      passed: false,
+      reason: "Invalid candle range"
+    };
   }
 
   const body = Math.abs(last.close - last.open);
@@ -542,24 +581,31 @@ function checkLiquidityTrap(candles, direction) {
   const lowerWick =
     Math.min(last.open, last.close) - last.low;
 
-  const bodyRatio = body / range;
-
-  if (bodyRatio < 0.30) {
-    return { passed: false, reason: "Weak candle body" };
+  if (body / range < 0.30) {
+    return {
+      passed: false,
+      reason: "Weak candle body"
+    };
   }
 
   if (
     direction === "BUY" &&
     upperWick / range > 0.45
   ) {
-    return { passed: false, reason: "Upper wick rejection" };
+    return {
+      passed: false,
+      reason: "Upper wick rejection"
+    };
   }
 
   if (
     direction === "SELL" &&
     lowerWick / range > 0.45
   ) {
-    return { passed: false, reason: "Lower wick rejection" };
+    return {
+      passed: false,
+      reason: "Lower wick rejection"
+    };
   }
 
   const priorHigh = Math.max(...previous.map(c => c.high));
@@ -570,7 +616,10 @@ function checkLiquidityTrap(candles, direction) {
     last.high > priorHigh &&
     last.close < priorHigh
   ) {
-    return { passed: false, reason: "Possible buy-side liquidity sweep" };
+    return {
+      passed: false,
+      reason: "Possible buy-side liquidity sweep"
+    };
   }
 
   if (
@@ -578,21 +627,30 @@ function checkLiquidityTrap(candles, direction) {
     last.low < priorLow &&
     last.close > priorLow
   ) {
-    return { passed: false, reason: "Possible sell-side liquidity sweep" };
+    return {
+      passed: false,
+      reason: "Possible sell-side liquidity sweep"
+    };
   }
 
   if (
     direction === "BUY" &&
     last.close <= last.open
   ) {
-    return { passed: false, reason: "No bullish candle confirmation" };
+    return {
+      passed: false,
+      reason: "No bullish candle confirmation"
+    };
   }
 
   if (
     direction === "SELL" &&
     last.close >= last.open
   ) {
-    return { passed: false, reason: "No bearish candle confirmation" };
+    return {
+      passed: false,
+      reason: "No bearish candle confirmation"
+    };
   }
 
   return { passed: true };
@@ -624,12 +682,23 @@ function buildTrade(candles, direction) {
 
 async function analyzeCoin(pair) {
   try {
-    const [c5, c15, c1h, book] = await Promise.all([
-      getCandles(pair, "5m"),
-      getCandles(pair, "15m"),
-      getCandles(pair, "1h"),
+    const [c5, c1h, book] = await Promise.all([
+      getFuturesCandles(
+        pair,
+        "5",
+        CONFIG.fiveMinuteCandles,
+        5 * 60 * 1000
+      ),
+      getFuturesCandles(
+        pair,
+        "60",
+        CONFIG.hourlyCandles,
+        60 * 60 * 1000
+      ),
       getOrderbook(pair)
     ]);
+
+    const c15 = aggregate15m(c5);
 
     if (
       c5.length < 60 ||
@@ -680,15 +749,12 @@ async function analyzeCoin(pair) {
     if (!rising && !falling) return [];
 
     const bookCheck = checkOrderbook(book, price);
-
     if (!bookCheck.passed) return [];
 
     const trapCheck = checkLiquidityTrap(c5, direction);
-
     if (!trapCheck.passed) return [];
 
     const trade = buildTrade(c5, direction);
-
     if (!trade) return [];
 
     const common = {
@@ -698,7 +764,7 @@ async function analyzeCoin(pair) {
       timeframe: "5m",
       trend5m: trend5,
       trend15m: trend15,
-      trend1h: trend1h,
+      trend1h,
       liquidityStatus: "PASSED",
       trapProtection: "PASSED",
       spreadPercent: bookCheck.spreadPercent,
@@ -729,7 +795,7 @@ async function analyzeCoin(pair) {
 
   } catch (error) {
     status.errors++;
-    status.lastError = `${pair}: ${error.message}`;
+    status.lastError = `${pair}: ${error.response?.status || ""} ${error.message}`;
     return [];
   }
 }
@@ -739,7 +805,7 @@ async function scanMarket() {
 
   scanning = true;
   status.running = true;
-  status.message = "Fetching CoinDCX active futures pairs";
+  status.message = "Fetching CoinDCX futures pairs";
   status.errors = 0;
   status.lastError = null;
 
@@ -748,7 +814,6 @@ async function scanMarket() {
 
   try {
     const activePairs = await getActivePairs();
-
     const pairs = activePairs.slice(0, selectedScanLimit);
 
     status.activePairs = activePairs.length;
@@ -782,19 +847,15 @@ async function scanMarket() {
       status.message =
         `Scanned ${status.scanned} of ${pairs.length} pairs`;
 
-      await sleep(250);
+      await sleep(200);
     }
 
     risingSignals = newRising
-      .sort((a, b) =>
-        b.maRisePercent - a.maRisePercent
-      )
+      .sort((a, b) => b.maRisePercent - a.maRisePercent)
       .slice(0, CONFIG.maxSignalsPerSection);
 
     fallingSignals = newFalling
-      .sort((a, b) =>
-        b.maFallPercent - a.maFallPercent
-      )
+      .sort((a, b) => b.maFallPercent - a.maFallPercent)
       .slice(0, CONFIG.maxSignalsPerSection);
 
     status.lastScan = new Date().toISOString();
@@ -812,7 +873,6 @@ async function scanMarket() {
   }
 }
 
-// API: settings
 app.get("/api/settings", (req, res) => {
   res.json({
     selectedScanLimit,
@@ -840,7 +900,6 @@ app.post("/api/settings", (req, res) => {
   scanMarket();
 });
 
-// API: scanner status
 app.get("/api/status", (req, res) => {
   res.json({
     ...status,
@@ -849,7 +908,6 @@ app.get("/api/status", (req, res) => {
   });
 });
 
-// API: rising volume MA signals
 app.get("/api/signals/rising", (req, res) => {
   res.json({
     section: "RISING_VOLUME_MA",
@@ -858,7 +916,6 @@ app.get("/api/signals/rising", (req, res) => {
   });
 });
 
-// API: falling volume MA signals
 app.get("/api/signals/falling", (req, res) => {
   res.json({
     section: "FALLING_VOLUME_MA",
@@ -867,7 +924,6 @@ app.get("/api/signals/falling", (req, res) => {
   });
 });
 
-// API: both signal groups
 app.get("/api/signals", (req, res) => {
   res.json({
     rising: risingSignals,
@@ -875,7 +931,6 @@ app.get("/api/signals", (req, res) => {
   });
 });
 
-// API: manual scan
 app.post("/api/refresh", (req, res) => {
   if (scanning) {
     return res.json({
@@ -892,12 +947,11 @@ app.post("/api/refresh", (req, res) => {
   });
 });
 
-// API: health check
 app.get("/api/health", (req, res) => {
   res.json({
     online: true,
     scanner: "UD Volume MA Momentum Scanner",
-    exchange: "CoinDCX",
+    exchange: "CoinDCX Futures",
     entryTimeframe: "5m",
     confirmationTimeframes: ["15m", "1h"],
     timestamp: new Date().toISOString()
